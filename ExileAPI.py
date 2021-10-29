@@ -6,16 +6,17 @@ import requests
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
+import pandas as pd
 
 
 class AffixDesc():
     def __init__(self, path, logger):
-        self.logger = logger
+        self.__logger = logger
 
         self.translations = self.__parse_translations(path)
 
     def __parse_translations(self, path):
-        self.logger.debug(f"Opening {path}")
+        self.__logger.debug(f"Opening {path}")
         translations = {}
         translation_data = None
         with open(path, "r") as f:
@@ -54,7 +55,7 @@ class AffixDesc():
 
         entries = self.translations.get(id, None)
         if entries is None:
-            self.logger.warning(f"No translations found for {id}")
+            self.__logger.warning(f"No translations found for {id}")
             return base_str
 
         for entry in entries:
@@ -81,7 +82,7 @@ class AffixDesc():
         try:
             entries = self.translations[id]
         except KeyError:
-            self.logger.warning(f"No translations found for {id}")
+            self.__logger.warning(f"No translations found for {id}")
             return ""
         for entry in entries:
             cmin = entry["condition"].get("min")
@@ -101,10 +102,10 @@ class AffixDesc():
             elif cmin is None and cmax is None:
                 return rstr
 
-class Affix():
+
+class Affix(object):
     def __init__(
         self,
-        logger,
         translations: AffixDesc,
         name: str,
         group: str,
@@ -115,7 +116,6 @@ class Affix():
         essence: bool,
         weights: List[Dict[str, Any]]
     ):
-        self.logger = logger
         self.name = name
         self.group = group
         self.type = a_type
@@ -142,7 +142,6 @@ class Affix():
                 if t is not None:
                     raw_strs.add(t)
             except KeyError:
-                self.logger.error("KE")
                 continue
         base_str = "\n".join(list(raw_strs))
 
@@ -157,9 +156,11 @@ class Affix():
             except KeyError:
                 continue
             except TypeError as e:
-                self.logger.error(f"{e}:\n\t{stat}")
                 raise e
         self.desc = base_str
+
+    def as_dict(self):
+        return vars(self)
 
     @staticmethod
     def replace_string(v1, v2, s, fmt, fs):
@@ -207,18 +208,19 @@ class Affix():
             base_types.add(t)
         return base_types
 
-
     def is_craftable(self):
         if (
-            (self.type == "suffix" or self.type == "prefix")
-            and self.domain == "item"
+            (
+                self.type == "suffix" or
+                self.type == "prefix" or
+                self.type == "corrupted"
+            )
         ):
             craftable = False
             for weight in self.weights:
                 if weight.get("weight", 0) > 0:
                     craftable = True
             return craftable
-
 
     def print_table(self):
         print(f"Mod: {self.desc}")
@@ -228,6 +230,7 @@ class Affix():
         print(f"\tCraftable on: {', '.join(self.base_types)}")
         print(f"\tInfluence: {self.influence}")
         print(f"\tEssence Only: {self.essence}")
+        print(f"\tDomain: {self.domain}")
         print("\n")
 
 
@@ -252,23 +255,20 @@ class ExileAPI():
 
         self.base = "https://api.pathofexile.com"
         self.__logger_setup(log_level)
-        self.translations = AffixDesc(translation_file, self.logger)
+        self.translations = AffixDesc(translation_file, self.__logger)
         self.affixes = self.__parse_affixes(affix_file)
-        self.logger.debug(f"{len(self.affixes)} affixes loaded")
-
-
+        self.__logger.debug(f"{len(self.affixes)} affixes loaded")
 
     def __parse_affixes(self, path):
-        self.logger.debug(f"Opening {path}")
+        self.__logger.debug(f"Opening {path}")
         affix_data = None
         with open(path, "r") as f:
             affix_data = json.load(f)
-        self.logger.debug("Parsing affixes")
+        self.__logger.debug("Parsing affixes")
         affixes = []
         for k, d in affix_data.items():
             try:
                 a = Affix(
-                    self.logger,
                     self.translations,
                     d.get("name"),
                     d.get("group"),
@@ -281,10 +281,9 @@ class ExileAPI():
                 )
                 affixes.append(a)
             except Exception as e:
-                self.logger.error(f"{k} - {d} failed")
+                self.__logger.error(f"{k} - {d} failed")
                 raise e
-           
-        self.logger.debug("Affix parse complete")
+        self.__logger.debug("Affix parse complete")
         return affixes
 
     def __logger_setup(self, log_level):
@@ -294,9 +293,9 @@ class ExileAPI():
         ch = logging.StreamHandler()
         # ch.setLevel(log_level)
         ch.setFormatter(log_format)
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self.logger.addHandler(ch)
-        self.logger.setLevel(log_level)
+        self.__logger = logging.getLogger(self.__class__.__name__)
+        self.__logger.addHandler(ch)
+        self.__logger.setLevel(log_level)
 
     def find_affix_by_tag(self, tags: List[str]) -> List[Affix]:
         results = []
@@ -306,10 +305,25 @@ class ExileAPI():
                 results.append(affix)
         return results
 
-    def find_affix_by_type(self, types: List[str]) -> List[Affix]:
+    def find_affix_by_type(
+        self,
+        types: List[str],
+        partial=False
+    ) -> List[Affix]:
         results = []
         for affix in self.affixes:
-            intersect = affix.base_types.intersection(set(types))
-            if len(intersect) > 0:
-                results.append(affix)
+            if partial:
+                for t in types:
+                    self.__logger.debug(f"Checking if {t} in {affix.base_types}")
+                    for bt in list(affix.base_types):
+                        if t in bt:
+                            results.append(affix)
+            else:
+                intersect = affix.base_types.intersection(set(types))
+                if len(intersect) > 0:
+                    results.append(affix)
         return results
+
+    @staticmethod
+    def as_df(result_list: List[Affix]) -> pd.DataFrame:
+        return pd.DataFrame([affix.as_dict() for affix in result_list])
